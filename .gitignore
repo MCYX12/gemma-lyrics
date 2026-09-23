@@ -1,0 +1,25 @@
+# Virtual environment
+venv/
+
+# Large model weights
+model/
+
+# Base model dir (has embedded .git; download from HuggingFace: google/gemma-4-e4b-it)
+gemma-4-e4b-it/
+
+# llama.cpp full repo (clone separately)
+llama.cpp/
+
+# Training checkpoints (keep final adapter only)
+adapter/lora/0000*_adapters.safetensors
+
+# Compiled / cache
+__pycache__/
+scripts/__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Temp files
+*.check.*
