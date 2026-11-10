@@ -1,168 +1,194 @@
-# gemma-lyrics
+<p align="center">
+  <img src="docs/assets/banner.png" alt="gemma-lyrics · 中文歌词 LoRA" width="100%">
+</p>
 
-基于 [Gemma 4 e4b-it](https://huggingface.co/google/gemma-4-e4b-it) 的中文歌词生成模型，使用 MLX LoRA 在 Apple Silicon 上微调，支持 Ollama 本地部署。
+<p align="center">
+  <img src="https://img.shields.io/badge/base-Gemma%204%20e4b--it-4285F4?style=flat-square&logo=google&logoColor=white" alt="Gemma 4 e4b-it">
+  <img src="https://img.shields.io/badge/fine--tune-MLX%20LoRA-000000?style=flat-square&logo=apple&logoColor=white" alt="MLX LoRA">
+  <img src="https://img.shields.io/badge/serving-Ollama-111111?style=flat-square" alt="Ollama">
+  <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/dataset-202%20pairs-22c55e?style=flat-square" alt="202 training pairs">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" alt="MIT"></a>
+</p>
+
+<p align="center">
+  <strong>写中文歌词，也写数字简谱</strong><br>
+  <sub>Gemma 4 e4b-it · MLX LoRA · 标签式创作约束 · Ollama 与 mlx-lm 双路推理</sub>
+</p>
 
 ---
+
+> [!NOTE]
+> 仓库体积主要来自 28 MB 的 LoRA 适配器与数据集，**不含基座模型**（需从 HuggingFace 下载 Gemma 4 e4b-it）与 `llama.cpp` 仓库。训练与评测在 Apple Silicon 上完成，结果只用于工程对比，不代表通用歌词质量。
+
+| 训练对 | 适配器 | 训练步数 | 推理路径 |
+| :---: | :---: | :---: | :---: |
+| **202** | **28 MB** | **300 iters** | **2 条** |
+
+## 项目简介
+
+通用大模型写中文歌词常见两类问题：要么堆砌空泛意象、句子模板化，要么把「风格」理解成对某位歌手的模仿。
+
+本项目用 LoRA 把 Gemma 4 e4b-it 收窄到一条创作约束上：
+
+- **标签式输入**：`风格：… 情绪：… 场景：… 结构：… 意象：…` 直接作为创作约束，不写成任务说明，也不复述标签；
+- **成品而不是片段**：默认输出 5 段完整歌曲（主歌 ×2、副歌、桥段、收束），16–28 行；
+- **可转简谱**：要求「简谱」时输出 `1-7 / 0 / - / |` 记谱，第一行带调号与拍号，再接对应歌词；
+- **不模仿具体作者**：系统提示明确禁止复刻在世作者、歌手、词人的可识别表达。
 
 ## 特性
 
-- 生成叙事抒情、画面感强、语言克制的中文原创歌词
-- 支持标签式输入：`风格：... 情绪：... 场景：...`
-- 支持**数字简谱**输出（含调号、拍号、旋律行）
-- 两种推理方式：Ollama（更快）和 MLX 直接推理
+| 能力 | 实现 |
+| --- | --- |
+| **风格控制** | 标签解析 + Modelfile 中 18 条系统规则，约束语气、结构与重复 |
+| **结构控制** | `generate.sh` / `run_ollama.sh` 按「完整歌曲 / 短片段」改写提示词，并给出最少行数 |
+| **数字简谱** | 模型输出简谱与歌词配对，`lyrics_to_jianpu.py` 做格式校验与规范化 |
+| **双路推理** | Ollama（GGUF，跨平台）与 mlx-lm（原生 MLX，Apple Silicon） |
+| **可复现训练** | `train.sh` 固定 rank / 层数 / 步数 / 学习率；适配器与数据均入库 |
+| **共享系统提示** | `Modelfile` 是两路推理共用的系统提示源，避免两套行为漂移 |
 
----
+## 架构
 
-## 环境要求
+```mermaid
+flowchart LR
+    subgraph DATA["数据"]
+        O["train_original.jsonl<br/>314 条原始样本"]
+        P["prepare_mlx_data.py<br/>清洗 / 去重 / 切分"]
+        T["train.jsonl<br/>202 条"]
+    end
 
-- Apple Silicon Mac（M 系列芯片）
-- Python 3.10+
-- [Ollama](https://ollama.com)（如需 Ollama 推理）
-- [llama.cpp](https://github.com/ggerganov/llama.cpp)（如需自行量化 GGUF）
+    subgraph TRAIN["训练（Apple Silicon）"]
+        L["mlx_lm.lora<br/>rank 8 · 16 layers · 300 iters"]
+        A["adapter/lora<br/>adapters.safetensors · 28 MB"]
+    end
 
----
+    subgraph SERVE["推理"]
+        M["Modelfile<br/>system prompt + 采样参数"]
+        OLL["Ollama<br/>GGUF q4_k_m"]
+        MLX["mlx-lm<br/>generate_lyrics.py"]
+        J["lyrics_to_jianpu.py<br/>简谱规范化"]
+    end
+
+    O --> P --> T --> L --> A
+    A --> OLL
+    A --> MLX
+    M --> OLL
+    M --> MLX
+    OLL --> J
+    MLX --> J
+```
+
+| 组件 | 作用 |
+| --- | --- |
+| `data/train_original.jsonl` | 原始样本（314 条），`messages` 格式 |
+| `scripts/prepare_mlx_data.py` | 解析、清洗、去重并切分 train / valid / test |
+| `scripts/train.sh` | 数据预处理 + `mlx_lm.lora` 训练，产物写入 `adapter/lora/` |
+| `Modelfile` | 系统提示、温度 / top_p / top_k / 重复惩罚 / 输出长度 |
+| `scripts/generate_lyrics.py` | MLX 直接推理，支持 seed、最少行数、重试与结构模板 |
+| `scripts/lyrics_to_jianpu.py` | 把「简谱 + 歌词」输出规范化并校验 |
+
+## 数据
+
+| 划分 | 条数 | 文件 |
+| --- | :---: | --- |
+| 原始 | 314 | `data/train_original.jsonl` |
+| 训练 | 202 | `data/train.jsonl` |
+| 验证 | 11 | `data/valid.jsonl` |
+| 测试 | 12 | `data/test.jsonl` |
+
+样本为单轮对话，`user` 是创作约束，`assistant` 是歌词正文：
+
+```json
+{"messages": [
+  {"role": "user", "content": "写一段带有独立音乐气质的歌词\n\n情绪：温柔\n意象：雪\n结构：中短句 + 第一人称 + 段落推进"},
+  {"role": "assistant", "content": "我不能再想\n如你所愿我已长大\n……"}
+]}
+```
+
+## 训练
+
+```bash
+python3 -m venv venv && source venv/bin/activate
+pip install mlx-lm
+
+# 下载基座模型到 model/gemma4_mlx（或 HF 的 gemma-4-e4b-it 目录）
+bash scripts/train.sh
+```
+
+| 参数 | 默认值 |
+| --- | :---: |
+| LoRA rank | 8 |
+| 微调层数 | 16 |
+| 训练步数 | 300 |
+| 学习率 | 5e-5 |
+| batch size | 1 |
+| max seq length | 512 |
+| 适配器大小 | 28 MB |
+
+训练完成后适配器在 `adapter/lora/`，可直接用于两路推理。
 
 ## 快速开始
 
-### 1. 克隆仓库
-
-```bash
-git clone https://github.com/MCYX12/gemma-lyrics.git
-cd gemma-lyrics
-```
-
-### 2. 创建虚拟环境并安装依赖
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install mlx-lm
-```
-
-### 3. 下载基座模型
-
-从 HuggingFace 下载 Gemma 4 e4b-it，放到 `gemma-4-e4b-it/` 目录：
-
-```bash
-huggingface-cli download google/gemma-4-e4b-it --local-dir gemma-4-e4b-it
-```
-
----
-
-## 推理
-
 ### 方式一：Ollama（推荐）
 
-需要先用 llama.cpp 将模型量化为 GGUF，然后注册到 Ollama：
-
 ```bash
-# 量化完成后执行
+# 1. 用 llama.cpp 把基座 + LoRA 量化为 gguf（放到 llama.cpp/ 下）
+# 2. 确认 Modelfile 的 FROM 指向量化后的文件
 bash scripts/build_ollama.sh
-```
 
-之后即可生成歌词：
-
-```bash
-# 普通提示词
+# 3. 生成
 bash scripts/run_ollama.sh "写一首关于离别的歌"
-
-# 标签式输入
 bash scripts/run_ollama.sh "风格：冷淡克制 情绪：孤独 场景：夜晚城市"
-
-# 数字简谱
 bash scripts/run_ollama.sh "写一段简谱，风格：民谣"
 ```
 
 ### 方式二：MLX 直接推理
 
-需要将微调后的模型转换为 MLX 格式，放到 `model/gemma4_mlx/`。
-
 ```bash
-# 普通歌词
+# 需要把微调后的模型转换为 MLX 格式，放在 model/gemma4_mlx/
 bash scripts/generate.sh "风格：后摇 情绪：告别 场景：车站"
-
-# 数字简谱
 bash scripts/generate.sh "简谱，风格：民谣 场景：田野"
 ```
 
----
+> `run_ollama.sh` 与 `generate.sh` 会自动识别「简谱 / 数字谱 / 片段」等关键词，改写提示词并追加行数与结构约束。
 
-## 训练
+## 数字简谱模式
 
-如需在自己的数据集上重新微调：
+- 第一行给出调号与拍号，例如 `1=C 4/4`；
+- 音符只用 `1-7 / 0 / - / | / , / '`，每行简谱后紧跟一行对应歌词；
+- 旋律与歌词长度大致匹配，节奏规整，不把整段歌词塞进一行；
+- 输出经 `lyrics_to_jianpu.py` 校验与规范化，异常会明确报错而不是静默丢弃。
 
-### 1. 准备数据
+## 目录结构
 
-将训练样本放入 `data/train_original.jsonl`，格式为：
-
-```json
-{"messages": [{"role": "user", "content": "写一段..."}, {"role": "assistant", "content": "歌词正文..."}]}
+```text
+Modelfile                    Ollama 模型定义（含 system prompt 与采样参数）
+adapter/lora/
+├── adapters.safetensors     LoRA 权重（28 MB）
+└── adapter_config.json      LoRA 超参数
+data/
+├── train_original.jsonl     原始样本
+├── train.jsonl              清洗后训练集
+├── valid.jsonl              验证集
+└── test.jsonl               测试集
+scripts/
+├── prepare_mlx_data.py      数据清洗与切分
+├── train.sh                 预处理 + MLX LoRA 训练
+├── generate.sh              MLX 推理入口
+├── generate_lyrics.py       MLX 生成（采样、重试、结构模板）
+├── run_ollama.sh            Ollama 推理入口
+├── build_ollama.sh          注册 Ollama 模型
+└── lyrics_to_jianpu.py      简谱规范化
 ```
 
-### 2. 数据预处理 + 训练
+## 已知限制
 
-```bash
-bash scripts/train.sh
-```
+- 训练集只有 202 条，风格覆盖有限；换题材后需要补数据重新微调。
+- 评测以人工对比为主，没有自动化的歌词质量指标；仓库中的对比不代表通用优劣。
+- 简谱由模型生成后格式化，旋律合理性未做音乐理论校验。
+- MLX 路径仅支持 Apple Silicon；Ollama 路径需自行完成 GGUF 量化。
+- 基座模型受 Gemma Terms of Use 约束，本仓库的 MIT 许可只覆盖代码与适配器。
 
-训练参数（在 `scripts/train.sh` 中修改）：
+## 许可
 
-| 参数 | 默认值 |
-|------|--------|
-| LoRA rank | 8 |
-| 训练轮数 | 300 iters |
-| 学习率 | 5e-5 |
-| batch size | 1 |
-| max seq length | 512 |
-| 微调层数 | 16 |
-
-训练完成后，适配器权重保存在 `adapter/lora/`。
-
----
-
-## 文件结构
-
-```
-gemma-lyrics/
-├── Modelfile                   # Ollama 模型配置（含 system prompt）
-├── adapter/lora/
-│   ├── adapters.safetensors    # 训练好的 LoRA 权重
-│   └── adapter_config.json     # LoRA 超参数配置
-├── data/
-│   ├── train_original.jsonl    # 原始训练数据
-│   ├── train.jsonl             # 处理后训练集
-│   ├── valid.jsonl             # 验证集
-│   └── test.jsonl              # 测试集
-└── scripts/
-    ├── train.sh                # 数据预处理 + MLX LoRA 训练
-    ├── generate.sh             # MLX 直接推理
-    ├── run_ollama.sh           # Ollama 推理
-    ├── build_ollama.sh         # 注册 Ollama 模型
-    ├── generate_lyrics.py      # MLX 推理主程序
-    ├── lyrics_to_jianpu.py     # 歌词转数字简谱
-    └── prepare_mlx_data.py     # 数据集预处理
-```
-
----
-
-## 示例输出
-
-**输入：** `风格：冷淡克制 情绪：孤独 场景：夜晚城市`
-
-```
-楼道的灯一闪一闪
-像你走后没说完的话
-雨水顺着窗缝爬进来
-把床单一点点泡凉
-
-我听见夜里很远的车声
-像谁把名字叫到一半
-整座城市都关了门
-只剩我还站在回声里面
-```
-
----
-
-## License
-
-本项目代码采用 [MIT License](LICENSE)。模型权重基于 [Gemma Terms of Use](https://ai.google.dev/gemma/terms)。
+代码与适配器：[MIT](LICENSE)。基座模型 Gemma 4 e4b-it 遵循其自带使用条款。
